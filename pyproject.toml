@@ -1,0 +1,35 @@
+[project]
+name = "blog"
+version = "0.1.0"
+description = "Le blog des Wizards : projet fil rouge du module FastAPI"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]==0.152.0",
+]
+
+[tool.fastapi]
+entrypoint = "app.main:app"
+
+[tool.ruff]
+# migrations générées par Alembic : on ne les retouche pas
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+extend-select = ["FAST", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+# le dossier alembic/ du projet ne doit pas masquer la bibliothèque alembic
+known-third-party = ["alembic"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+# les tests de validation se lancent un par un : pytest tests/validation/test_tpNN.py
+norecursedirs = ["validation"]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.15.1",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]

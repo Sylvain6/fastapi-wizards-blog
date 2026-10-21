@@ -1,0 +1,27 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:80"
+    env_file: .env
+    volumes:
+      - .:/app
+      # le .venv du conteneur (Linux) ne doit pas être écrasé par celui du poste
+      - /app/.venv
+    depends_on:
+      database:
+        condition: service_healthy
+
+  database:
+    image: postgres:17
+    env_file: .env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  pgdata:

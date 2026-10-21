@@ -1,0 +1,153 @@
+"""TP 5 : configuration, modèle Article et migrations.
+
+docker compose exec app uv run alembic upgrade head
+docker compose exec app uv run pytest tests/validation/test_tp05.py
+"""
+
+from collections.abc import Iterator
+
+import pytest
+
+from tests.conftest import exiger, importer
+
+
+def test_settings():
+    exiger("pydantic_settings")
+    config = importer("app.config", attendu_au="TP 5")
+    assert hasattr(config, "settings"), (
+        "app/config.py doit créer settings = Settings()."
+    )
+    settings = config.settings
+    for champ in ("database_url", "secret_key", "llm_model", "llm_api_key"):
+        assert hasattr(settings, champ), f"Settings doit avoir un champ {champ}."
+    assert settings.database_url.startswith("postgresql+psycopg://"), (
+        "DATABASE_URL doit commencer par postgresql+psycopg:// : "
+        "avec postgresql:// seul, SQLAlchemy cherche psycopg2."
+    )
+
+
+def test_llm_par_defaut():
+    Settings = importer("app.config", attendu_au="TP 5").Settings
+    champs = Settings.model_fields
+    assert champs["llm_model"].default == "test", (
+        'llm_model doit valoir "test" par défaut.'
+    )
+    assert champs["llm_api_key"].default == "", 'llm_api_key doit valoir "" par défaut.'
+
+
+@pytest.mark.parametrize(
+    "nom",
+    ["engine", "SessionLocal", "Base", "get_session_factory", "get_db", "DbSession"],
+)
+def test_db_expose(nom):
+    db = importer("app.db", attendu_au="TP 5")
+    assert hasattr(db, nom), f"app/db.py doit définir {nom}."
+
+
+def test_get_db_utilise_la_fabrique(session_factory):
+    db = importer("app.db", attendu_au="TP 5")
+    generateur = db.get_db(session_factory)
+    assert isinstance(generateur, Iterator), (
+        "get_db(factory) doit être un générateur : with factory() as db: yield db"
+    )
+    session = next(generateur)
+    assert session.bind is session_factory.kw["bind"], (
+        "get_db doit ouvrir sa session avec la fabrique reçue en paramètre."
+    )
+    generateur.close()
+
+
+def test_modele_article():
+    Article = importer("app.models.article", attendu_au="TP 5").Article
+    table = Article.__table__
+    assert table.name == "article", '__tablename__ doit valoir "article".'
+    colonnes = set(table.columns.keys())
+    assert {"id", "titre", "contenu", "created_at"} <= colonnes, (
+        f"La table article doit avoir id, titre, contenu et created_at (trouvé : {colonnes})."
+    )
+    assert table.columns["id"].primary_key, "id doit être la clé primaire."
+    assert table.columns["titre"].type.length == 255, "titre doit être un String(255)."
+    assert type(table.columns["contenu"].type).__name__ == "Text", (
+        "contenu doit être un Text."
+    )
+    assert table.columns["created_at"].server_default is not None, (
+        "created_at doit être rempli par la base : server_default=func.now()."
+    )
+
+
+def test_models_importe_article():
+    models = importer("app.models", attendu_au="TP 5")
+    assert hasattr(models, "Article"), (
+        "app/models/__init__.py doit importer Article : sans ça, Alembic ne voit pas la table."
+    )
+
+
+def test_article_enregistre_puis_relu(db):
+    Article = importer("app.models.article", attendu_au="TP 5").Article
+    db.add(Article(titre="Mon article", contenu="Du contenu"))
+    db.commit()
+    db.expunge_all()
+    relu = db.query(Article).one()
+    assert relu.id is not None, "L'article enregistré doit recevoir un id."
+    assert relu.titre == "Mon article"
+    assert relu.created_at is not None, (
+        "created_at doit être rempli à l'enregistrement."
+    )
+
+
+def test_lifespan_ferme_les_connexions(monkeypatch):
+    db = importer("app.db", attendu_au="TP 5")
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    appels = []
+    monkeypatch.setattr(db.engine, "dispose", lambda *a, **k: appels.append(1))
+    with TestClient(app):
+        pass
+    assert appels, "À l'arrêt, le lifespan doit appeler engine.dispose()."
+
+
+# Postgres : la vraie base, après alembic upgrade head
+
+
+def test_table_dans_postgres():
+    exiger("sqlalchemy", "psycopg")
+    from sqlalchemy import inspect
+    from sqlalchemy.exc import OperationalError
+
+    engine = importer("app.db", attendu_au="TP 5").engine
+    try:
+        tables = inspect(engine).get_table_names()
+    except OperationalError as exc:
+        pytest.fail(f"Connexion à Postgres impossible : {exc.orig}", pytrace=False)
+    assert "article" in tables, (
+        "La table article n'existe pas dans Postgres : "
+        "lancez alembic revision --autogenerate, puis alembic upgrade head."
+    )
+    colonnes = {c["name"] for c in inspect(engine).get_columns("article")}
+    assert {"id", "titre", "contenu", "created_at"} <= colonnes, (
+        f"Dans Postgres, la table article a les colonnes {colonnes}."
+    )
+
+
+def test_aucune_migration_en_attente():
+    exiger("sqlalchemy", "alembic", "psycopg")
+    from alembic import command
+    from alembic.config import Config
+    from alembic.util.exc import AutogenerateDiffsDetected, CommandError
+
+    try:
+        command.check(Config("alembic.ini"))
+    except AutogenerateDiffsDetected as exc:
+        pytest.fail(
+            f"Le modèle et la base diffèrent : {exc}. Générez une migration "
+            "(alembic revision --autogenerate) puis appliquez-la (alembic upgrade head).",
+            pytrace=False,
+        )
+    except CommandError as exc:
+        pytest.fail(
+            f"alembic check a échoué : {exc}. Avez-vous lancé alembic upgrade head, "
+            "et env.py définit-il target_metadata = Base.metadata ?",
+            pytrace=False,
+        )
