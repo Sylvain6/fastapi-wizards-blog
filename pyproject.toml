@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "Le blog des Wizards : projet fil rouge du module FastAPI"
 requires-python = ">=3.13"
 dependencies = [
+    "alembic>=1.20.0",
     "fastapi[standard]==0.152.0",
+    "itsdangerous>=2.2.0",
+    "psycopg[binary]>=3.3.6",
+    "pwdlib[argon2]>=0.3.1",
+    "pydantic-settings>=2.16.1",
+    "pyjwt>=2.15.1",
+    "sqlalchemy>=2.1.5",
 ]
 
 [tool.fastapi]
@@ -29,6 +36,7 @@ norecursedirs = ["validation"]
 
 [dependency-groups]
 dev = [
+    "faker>=40.43.0",
     "httpx2>=2.15.1",
     "pytest>=9.1.1",
     "ruff>=0.17.1",
