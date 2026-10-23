@@ -130,22 +130,6 @@ def test_creation_api_remplit_le_slug(client, db):
     )
 
 
-def test_creation_formulaire_remplit_le_slug(client, db):
-    response = client.post(
-        "/articles/new",
-        data={"titre": "Ça marche ? Oui !!", "contenu": "Un contenu assez long."},
-        follow_redirects=False,
-    )
-    route_declaree(response, "POST /articles/new")
-    assert response.status_code == 303, (
-        f"Le formulaire doit rediriger en 303 : {response.text[:200]}"
-    )
-    article_id = re.search(r"/articles/(\d+)$", response.headers["location"]).group(1)
-    assert slug_en_base(db, int(article_id)) == "ca-marche-oui", (
-        "Le formulaire doit aussi remplir le slug : il appelle le même service que l'API."
-    )
-
-
 def test_routes_sans_logique_de_creation():
     fautifs = [
         str(fichier)

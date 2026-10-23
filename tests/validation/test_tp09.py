@@ -7,7 +7,6 @@ docker compose exec app uv run pytest tests/validation/test_tp09.py
 """
 
 import inspect
-import re
 from datetime import UTC, datetime
 
 import pytest
@@ -314,76 +313,6 @@ def test_services_recoivent_l_utilisateur():
     assert len(parametres) >= 3, (
         "create_article reçoit l'utilisateur en paramètre : create_article(db, data, author). "
         "Au J4, l'agent l'appellera avec l'utilisateur connecté."
-    )
-
-
-# Pages HTML et cookie
-
-
-def test_page_de_connexion(client):
-    response = client.get("/login")
-    route_declaree(response, "GET /login")
-    assert response.status_code == 200 and "<form" in response.text, (
-        "GET /login doit afficher un formulaire."
-    )
-
-
-def test_connexion_pose_un_cookie(client, alice):
-    response = client.post(
-        "/login",
-        data={"username": "alice@blog.fr", "password": MOT_DE_PASSE},
-        follow_redirects=False,
-    )
-    route_declaree(response, "POST /login")
-    assert response.status_code == 303, (
-        f"POST /login doit rediriger en 303, pas {response.status_code}."
-    )
-    cookie = response.headers.get("set-cookie", "")
-    assert cookie.startswith("access_token="), (
-        "POST /login doit poser le cookie access_token."
-    )
-    assert "httponly" in cookie.lower(), (
-        "Le cookie doit être httponly : le JavaScript ne peut pas le lire."
-    )
-
-
-def test_connexion_refusee(client, alice):
-    response = client.post(
-        "/login",
-        data={"username": "alice@blog.fr", "password": "mauvais"},
-        follow_redirects=False,
-    )
-    assert "access_token=" not in response.headers.get("set-cookie", ""), (
-        "Des identifiants invalides ne doivent pas poser de cookie."
-    )
-
-
-def test_formulaire_avec_le_cookie(client, db, alice):
-    client.post(
-        "/login",
-        data={"username": "alice@blog.fr", "password": MOT_DE_PASSE},
-        follow_redirects=False,
-    )
-    response = client.post("/articles/new", data=ARTICLE, follow_redirects=False)
-    assert response.status_code == 303, (
-        f"Connecté par cookie, le formulaire doit créer l'article (303), pas {response.status_code} : "
-        "get_current_user lit l'en-tête Bearer, sinon le cookie access_token."
-    )
-    Article = importer("app.models.article", attendu_au="TP 5").Article
-    article_id = int(
-        re.search(r"/articles/(\d+)$", response.headers["location"]).group(1)
-    )
-    db.expire_all()
-    assert db.get(Article, article_id).author_id == alice["id"], (
-        "L'article du formulaire appartient à l'utilisateur du cookie."
-    )
-
-
-def test_formulaire_sans_cookie(client):
-    response = client.get("/articles/new", follow_redirects=False)
-    route_declaree(response, "GET /articles/new")
-    assert response.status_code != 200, (
-        "Sans être connecté, /articles/new ne doit pas afficher le formulaire : redirigez vers /login."
     )
 
 

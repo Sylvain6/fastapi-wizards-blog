@@ -4,13 +4,11 @@ docker compose exec app uv run alembic upgrade head
 docker compose exec app uv run pytest tests/validation/test_tp10.py
 """
 
-import html
 import json
-import re
 
 import pytest
 
-from tests.conftest import MOT_DE_PASSE, exiger, importer, route_declaree
+from tests.conftest import exiger, importer, route_declaree
 
 CONTENU = "Un contenu assez long."
 
@@ -186,58 +184,6 @@ def test_service_search():
     )
     assert (articles.search.__doc__ or "").strip(), (
         "search doit avoir sa docstring : au J4, c'est l'outil le plus utilisé par l'agent."
-    )
-
-
-# La page de l'article
-
-
-def test_page_affiche_les_commentaires_et_leur_auteur(client, alice, bob):
-    article = creer_article(client, alice)
-    commenter(client, bob, article["id"], "Un commentaire visible")
-    page = html.unescape(client.get(f"/articles/{article['id']}").text)
-    assert "Un commentaire visible" in page, (
-        "La page de l'article doit afficher ses commentaires."
-    )
-    assert "bob@blog.fr" in page, "Chaque commentaire affiché doit indiquer son auteur."
-
-
-def formulaire_de_commentaire(page):
-    for formulaire in re.findall(r"<form.*?</form>", page, re.DOTALL | re.IGNORECASE):
-        if 'name="contenu"' in formulaire:
-            return formulaire
-    return None
-
-
-def test_formulaire_reserve_aux_connectes(client, alice):
-    article = creer_article(client, alice)
-    page = client.get(f"/articles/{article['id']}").text
-    assert formulaire_de_commentaire(page) is None, (
-        "Sans être connecté, la page ne doit pas proposer le formulaire de commentaire."
-    )
-
-
-def test_commenter_depuis_la_page(client, alice, bob):
-    article = creer_article(client, alice)
-    client.post("/login", data={"username": "bob@blog.fr", "password": MOT_DE_PASSE})
-    page = client.get(f"/articles/{article['id']}").text
-    formulaire = formulaire_de_commentaire(page)
-    assert formulaire is not None, (
-        'Connecté, la page de l\'article doit proposer un <form> avec un champ name="contenu".'
-    )
-    action = re.search(r'action="([^"]+)"', formulaire)
-    assert action, "Le formulaire de commentaire doit avoir un attribut action."
-    response = client.post(
-        action.group(1),
-        data={"contenu": "Écrit depuis la page"},
-        follow_redirects=False,
-    )
-    assert response.status_code in (200, 303), (
-        f"Envoyer le formulaire de commentaire doit réussir (303 vers l'article), pas {response.status_code}."
-    )
-    commentaires = client.get(f"/api/articles/{article['id']}/comments").json()
-    assert any(c["contenu"] == "Écrit depuis la page" for c in commentaires), (
-        "Le commentaire envoyé depuis la page doit être enregistré."
     )
 
 

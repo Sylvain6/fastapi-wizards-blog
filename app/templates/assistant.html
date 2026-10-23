@@ -1,0 +1,346 @@
+{% extends "base.html" %}
+
+{#
+  TP 14 : page fournie, les élèves n'écrivent pas de JavaScript.
+
+  Contrat côté backend :
+  - GET /assistant affiche ce template, réservé aux connectés ;
+  - la route POST de l'agent s'appelle « agui » (fonction agui), avec AGUIAdapter.dispatch_request ;
+  - l'utilisateur est lu dans le cookie : fetch l'envoie tout seul (même origine).
+
+  La page parle le protocole AG-UI sans bibliothèque : elle envoie un RunAgentInput en JSON,
+  lit le flux SSE (« data: {...} »), et relance l'agent avec « resume » quand un outil
+  à approbation (requires_approval=True) attend la décision de l'utilisateur.
+#}
+
+{% block title %}Assistant · Blog des Wizards{% endblock %}
+
+{% block body %}
+<style>
+  .assistant { display: flex; flex-direction: column; gap: .75rem; margin: 1rem 0; }
+  .assistant-fil { display: flex; flex-direction: column; gap: .5rem; min-height: 12rem; }
+  .assistant-fil > * { margin: 0; }
+  .assistant-vide { color: #666; font-style: italic; }
+  .bulle { padding: .5rem .75rem; border-radius: .5rem; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 90%; }
+  .bulle-user { align-self: flex-end; background: #e3f2fd; }
+  .bulle-assistant { align-self: flex-start; background: #f3f3f3; }
+  .bulle-assistant.en-cours::after { content: "▍"; animation: clignote 1s steps(1) infinite; }
+  @keyframes clignote { 50% { opacity: 0; } }
+  .outil { align-self: flex-start; font-size: .9rem; border-left: 3px solid #999; padding: .25rem .75rem; color: #444; }
+  .outil code { font-size: .85rem; }
+  .outil-resultat { border-left-color: #2e7d32; }
+  .validation { align-self: stretch; border: 2px solid #f9a825; border-radius: .5rem; padding: .75rem 1rem; background: #fffde7; }
+  .validation h3 { margin: 0 0 .5rem; font-size: 1rem; }
+  .validation dl { margin: 0 0 .75rem; }
+  .validation dt { font-weight: 600; }
+  .validation dd { margin: 0 0 .5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .validation .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .validation .decision { font-weight: 600; }
+  .erreur-agent { align-self: stretch; color: #b00020; border: 1px solid #b00020; border-radius: .5rem; padding: .5rem .75rem; }
+  .etat-partage { border: 1px dashed #999; border-radius: .5rem; padding: .5rem .75rem; font-size: .9rem; }
+  .etat-partage h3 { margin: 0 0 .25rem; font-size: .95rem; }
+  .etat-partage pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .assistant-saisie { display: flex; gap: .5rem; }
+  .assistant-saisie textarea { flex: 1; min-width: 0; font: inherit; padding: .5rem; resize: vertical; }
+  .assistant button { font: inherit; padding: .4rem .9rem; cursor: pointer; }
+  .assistant button:disabled { cursor: progress; opacity: .6; }
+</style>
+
+<h1>Assistant</h1>
+<p>Posez une question sur le blog, ou demandez un brouillon d'article. Avant toute écriture, l'assistant vous demande votre accord.</p>
+
+<section class="assistant" data-url-agui="{{ url_for('agui') }}">
+  <aside class="etat-partage" hidden>
+    <h3>Brouillon en cours</h3>
+    <pre></pre>
+  </aside>
+  <div class="assistant-fil" aria-live="polite">
+    <p class="assistant-vide">La conversation apparaîtra ici.</p>
+  </div>
+  <form class="assistant-saisie">
+    <label for="assistant-message" hidden>Votre message</label>
+    <textarea id="assistant-message" rows="2" placeholder="Ex. : rédige un brouillon sur les dépendances FastAPI" required></textarea>
+    <button type="submit">Envoyer</button>
+  </form>
+</section>
+
+<script>
+(() => {
+  const racine = document.querySelector(".assistant");
+  const URL_AGUI = racine.dataset.urlAgui;
+  const fil = racine.querySelector(".assistant-fil");
+  const formulaire = racine.querySelector(".assistant-saisie");
+  const champ = formulaire.querySelector("textarea");
+  const bouton = formulaire.querySelector("button");
+  const panneauEtat = racine.querySelector(".etat-partage");
+
+  const nouvelId = () =>
+    (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+
+  // L'état de la conversation : AG-UI est sans état côté serveur, la page renvoie tout à chaque tour.
+  const threadId = nouvelId();
+  const messages = [];
+  let etat = {};
+
+  // ---------- affichage ----------
+
+  function ajouter(element) {
+    fil.querySelector(".assistant-vide")?.remove();
+    fil.append(element);
+    element.scrollIntoView({ block: "end", behavior: "smooth" });
+    return element;
+  }
+
+  function bulle(role, texte = "") {
+    const p = document.createElement("p");
+    p.className = `bulle bulle-${role}`;
+    p.textContent = texte;
+    return ajouter(p);
+  }
+
+  function ligneOutil(texte, classe = "") {
+    const p = document.createElement("p");
+    p.className = `outil ${classe}`;
+    p.textContent = texte;
+    return ajouter(p);
+  }
+
+  function afficherErreur(texte) {
+    const p = document.createElement("p");
+    p.className = "erreur-agent";
+    p.textContent = `Erreur : ${texte}`;
+    ajouter(p);
+  }
+
+  function afficherEtat() {
+    const vide = !etat || Object.keys(etat).length === 0;
+    panneauEtat.hidden = vide;
+    if (!vide) panneauEtat.querySelector("pre").textContent = JSON.stringify(etat, null, 2);
+  }
+
+  function occupe(oui) {
+    bouton.disabled = oui;
+    champ.disabled = oui;
+    if (!oui) champ.focus();
+  }
+
+  // ---------- état partagé (bonus StateDeps) : STATE_SNAPSHOT et STATE_DELTA (JSON Patch) ----------
+
+  function appliquerPatch(cible, operations) {
+    const copie = structuredClone(cible ?? {});
+    for (const op of operations) {
+      const cles = op.path.split("/").slice(1).map((c) => c.replace(/~1/g, "/").replace(/~0/g, "~"));
+      const derniere = cles.pop();
+      let parent = copie;
+      for (const cle of cles) parent = parent[cle] ??= {};
+      if (op.op === "remove") {
+        Array.isArray(parent) ? parent.splice(Number(derniere), 1) : delete parent[derniere];
+      } else if (op.op === "add" && Array.isArray(parent)) {
+        derniere === "-" ? parent.push(op.value) : parent.splice(Number(derniere), 0, op.value);
+      } else if (op.op === "add" || op.op === "replace") {
+        parent[derniere] = op.value;
+      }
+    }
+    return copie;
+  }
+
+  // ---------- la validation humaine ----------
+
+  function lireArguments(texte) {
+    try { return JSON.parse(texte || "{}"); } catch { return { arguments: texte }; }
+  }
+
+  function trouverAppel(toolCallId) {
+    for (const m of messages) {
+      const appel = m.toolCalls?.find((t) => t.id === toolCallId);
+      if (appel) return appel;
+    }
+    return null;
+  }
+
+  function demanderValidation(interrupts) {
+    const decisions = new Map();
+    for (const interruption of interrupts) {
+      const appel = trouverAppel(interruption.toolCallId);
+      const nom = appel?.function.name ?? "outil";
+      const args = lireArguments(appel?.function.arguments);
+
+      const carte = document.createElement("div");
+      carte.className = "validation";
+      const titre = document.createElement("h3");
+      titre.textContent = `L'assistant veut utiliser « ${nom} »`;
+      const liste = document.createElement("dl");
+      for (const [cle, valeur] of Object.entries(args)) {
+        const dt = document.createElement("dt");
+        dt.textContent = cle;
+        const dd = document.createElement("dd");
+        dd.textContent = typeof valeur === "string" ? valeur : JSON.stringify(valeur, null, 2);
+        liste.append(dt, dd);
+      }
+      const actions = document.createElement("div");
+      actions.className = "actions";
+      const valider = document.createElement("button");
+      valider.type = "button";
+      valider.textContent = "Valider";
+      const refuser = document.createElement("button");
+      refuser.type = "button";
+      refuser.textContent = "Refuser";
+      actions.append(valider, refuser);
+      carte.append(titre, liste, actions);
+      ajouter(carte);
+
+      const decider = (approuve) => {
+        actions.replaceChildren();
+        const decision = document.createElement("span");
+        decision.className = "decision";
+        decision.textContent = approuve ? "✔ Validé" : "✖ Refusé";
+        actions.append(decision);
+        decisions.set(interruption.id, approuve
+          ? { approved: true }
+          : { approved: false, reason: "L'utilisateur a refusé." });
+        // Une fois toutes les demandes tranchées, on relance l'agent avec les décisions.
+        if (decisions.size === interrupts.length) {
+          const resume = [...decisions].map(([interruptId, payload]) => ({ interruptId, status: "resolved", payload }));
+          lancer(resume);
+        }
+      };
+      valider.addEventListener("click", () => decider(true));
+      refuser.addEventListener("click", () => decider(false));
+    }
+  }
+
+  // ---------- les événements AG-UI ----------
+
+  function traiter(evenement, contexte) {
+    switch (evenement.type) {
+      case "TEXT_MESSAGE_START": {
+        const message = { id: evenement.messageId, role: "assistant", content: "" };
+        messages.push(message);
+        contexte.bulles.set(evenement.messageId, { message, element: bulle("assistant") });
+        contexte.bulles.get(evenement.messageId).element.classList.add("en-cours");
+        break;
+      }
+      case "TEXT_MESSAGE_CONTENT": {
+        const b = contexte.bulles.get(evenement.messageId);
+        if (!b) break;
+        b.message.content += evenement.delta;
+        b.element.textContent = b.message.content;
+        break;
+      }
+      case "TEXT_MESSAGE_END": {
+        const b = contexte.bulles.get(evenement.messageId);
+        if (!b) break;
+        b.element.classList.remove("en-cours");
+        if (!b.message.content.trim()) b.element.remove(); // un message vide n'a rien à afficher
+        break;
+      }
+      case "TOOL_CALL_START": {
+        const parentId = evenement.parentMessageId ?? evenement.toolCallId;
+        let parent = messages.find((m) => m.id === parentId && m.role === "assistant");
+        if (!parent) {
+          parent = { id: parentId, role: "assistant", content: "" };
+          messages.push(parent);
+        }
+        const appel = { id: evenement.toolCallId, type: "function", function: { name: evenement.toolCallName, arguments: "" } };
+        (parent.toolCalls ??= []).push(appel);
+        contexte.appels.set(evenement.toolCallId, { appel, element: ligneOutil(`🔧 ${evenement.toolCallName}…`) });
+        break;
+      }
+      case "TOOL_CALL_ARGS": {
+        const a = contexte.appels.get(evenement.toolCallId);
+        if (a) a.appel.function.arguments += evenement.delta;
+        break;
+      }
+      case "TOOL_CALL_END": {
+        const a = contexte.appels.get(evenement.toolCallId);
+        if (a) a.element.textContent = `🔧 ${a.appel.function.name}(${a.appel.function.arguments})`;
+        break;
+      }
+      case "TOOL_CALL_RESULT": {
+        messages.push({ id: evenement.messageId, role: "tool", toolCallId: evenement.toolCallId, content: evenement.content });
+        ligneOutil(`↳ ${evenement.content}`, "outil-resultat");
+        break;
+      }
+      case "STATE_SNAPSHOT":
+        etat = evenement.snapshot ?? {};
+        afficherEtat();
+        break;
+      case "STATE_DELTA":
+        etat = appliquerPatch(etat, evenement.delta ?? []);
+        afficherEtat();
+        break;
+      case "RUN_ERROR":
+        afficherErreur(evenement.message ?? "l'agent a échoué.");
+        break;
+      case "RUN_FINISHED":
+        if (evenement.outcome?.type === "interrupt") contexte.interrupts = evenement.outcome.interrupts ?? [];
+        break;
+      // RUN_STARTED, REASONING_*, STEP_*… : rien à afficher.
+    }
+  }
+
+  // ---------- un tour d'agent : POST, puis lecture du flux SSE ----------
+
+  async function lancer(resume = null) {
+    occupe(true);
+    const contexte = { bulles: new Map(), appels: new Map(), interrupts: null };
+    const corps = { threadId, runId: nouvelId(), state: etat, messages, tools: [], context: [], forwardedProps: {} };
+    if (resume) corps.resume = resume;
+
+    try {
+      const reponse = await fetch(URL_AGUI, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify(corps),
+      });
+      if (reponse.status === 401) throw new Error("vous n'êtes plus connecté : reconnectez-vous.");
+      if (!reponse.ok) throw new Error(`le serveur a répondu ${reponse.status}.`);
+
+      // Le flux SSE : des blocs séparés par une ligne vide, chacun avec une ligne « data: {json} ».
+      const lecteur = reponse.body.pipeThrough(new TextDecoderStream()).getReader();
+      let tampon = "";
+      while (true) {
+        const { value, done } = await lecteur.read();
+        if (done) break;
+        tampon += value.replace(/\r\n/g, "\n");
+        let fin;
+        while ((fin = tampon.indexOf("\n\n")) !== -1) {
+          const bloc = tampon.slice(0, fin);
+          tampon = tampon.slice(fin + 2);
+          const donnees = bloc.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
+          if (donnees) traiter(JSON.parse(donnees), contexte);
+        }
+      }
+    } catch (erreur) {
+      afficherErreur(erreur.message);
+    } finally {
+      for (const { element } of contexte.bulles.values()) element.classList.remove("en-cours");
+    }
+
+    if (contexte.interrupts?.length) {
+      demanderValidation(contexte.interrupts); // la saisie reste bloquée jusqu'à la décision
+    } else {
+      occupe(false);
+    }
+  }
+
+  formulaire.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const texte = champ.value.trim();
+    if (!texte) return;
+    messages.push({ id: nouvelId(), role: "user", content: texte });
+    bulle("user", texte);
+    champ.value = "";
+    lancer();
+  });
+
+  // Entrée envoie, Maj+Entrée va à la ligne.
+  champ.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      formulaire.requestSubmit();
+    }
+  });
+})();
+</script>
+{% endblock %}
